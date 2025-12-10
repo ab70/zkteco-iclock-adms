@@ -1,7 +1,7 @@
 import { Elysia } from "elysia";
 import swagger from "@elysiajs/swagger";
 
-const PORT = 5002;
+const PORT = 3000;
 const text = (body: string, status = 200) =>
   new Response(body, { status, headers: { "Content-Type": "text/plain" } });
 const commandQueue = new Map<string, Array<{ id: number; cmd: string }>>();
