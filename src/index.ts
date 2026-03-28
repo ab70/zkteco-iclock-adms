@@ -9,12 +9,15 @@ const text = (body: string, status = 200) =>
   new Response(body, { status, headers: { "Content-Type": "text/plain" } });
 const commandQueue = new Map<string, Array<{ id: number; cmd: string }>>();
 const lastTimeSync = new Map<string, number>(); // Track last sync per device
+const deviceTimezones = new Map<string, number>(); // Store timezone per device
 const TIME_SYNC_INTERVAL = 5 * 60 * 1000; // Auto-sync every 5 minutes
 let cmdCounter = 1;
 
-const getConfiguredTime = () => {
+const getConfiguredTime = (sn?: string) => {
   const now = new Date();
-  const offsetMs = TIMEZONE_OFFSET * 60 * 60 * 1000;
+  // Use device-specific timezone if set, otherwise use global config
+  const offset = sn && deviceTimezones.has(sn) ? deviceTimezones.get(sn)! : TIMEZONE_OFFSET;
+  const offsetMs = offset * 60 * 60 * 1000;
   return new Date(now.getTime() + now.getTimezoneOffset() * 60000 + offsetMs);
 };
 
@@ -43,12 +46,10 @@ const autoSyncTime = (sn: string) => {
 //   return `Time=${localIso}${sign}${hh}:${mm}`;
 // };
 
-const formatDeviceTime = () => {
+const formatDeviceTime = (sn?: string) => {
   // Device internally uses UTC+8 (China time) and ignores timezone in response
   // We send the configured timezone time - device will display it as-is
-  const now = new Date();
-  const offsetMs = TIMEZONE_OFFSET * 60 * 60 * 1000;
-  const configTime = new Date(now.getTime() + now.getTimezoneOffset() * 60000 + offsetMs);
+  const configTime = getConfiguredTime(sn);
   
   const pad = (n: number) => String(n).padStart(2, "0");
   const y = configTime.getFullYear();
@@ -60,7 +61,8 @@ const formatDeviceTime = () => {
   
   // Send WITHOUT timezone suffix - device takes it literally
   const timeStr = `Time=${y}-${mo}-${d}T${h}:${mi}:${s}`;
-  console.log(`[TIME RESPONSE] Sending: ${timeStr} (${config.timezone.name})`);
+  const tzName = sn && deviceTimezones.has(sn) ? `UTC${deviceTimezones.get(sn)! >= 0 ? '+' : ''}${deviceTimezones.get(sn)}` : config.timezone.name;
+  console.log(`[TIME RESPONSE] Sending: ${timeStr} (${tzName})`);
   return timeStr;
 };
 
@@ -114,6 +116,23 @@ const app = new Elysia()
     const id = queueCommand(sn, command);
     return { status: "queued", id, command };
   })
+  .post("/api/device/timezone", ({ body }) => {
+    const { sn, timezone } = body as { sn: string; timezone: number };
+    if (!sn || timezone === undefined) return text("Missing sn or timezone", 400);
+    
+    deviceTimezones.set(sn, timezone);
+    queueCommand(sn, "CHECK"); // Force sync with new timezone
+    
+    const tzName = `UTC${timezone >= 0 ? '+' : ''}${timezone}`;
+    console.log(`\n[TIMEZONE UPDATE] Device ${sn} -> ${tzName}`);
+    
+    return { 
+      status: "queued", 
+      sn, 
+      timezone,
+      message: `Device will update to ${tzName} on next poll`
+    };
+  })
   .post("/api/attlog/last2days", ({ body }) => {
     const { sn, start, end } = body as { sn?: string; start?: string; end?: string };
     if (!sn) return text("Missing sn", 400);
@@ -139,13 +158,14 @@ const app = new Elysia()
     const { SN, type, options } = query;
     if (type === "time") {
       console.log("Device checking for time:", SN);
-      return text(formatDeviceTime())
+      return text(formatDeviceTime(SN as string))
     }
 
     if (options) {
-      const configTime = getConfiguredTime();
+      const configTime = getConfiguredTime(SN as string);
       const timeStr = `${configTime.getFullYear()}-${pad(configTime.getMonth() + 1)}-${pad(configTime.getDate())} ${pad(configTime.getHours())}:${pad(configTime.getMinutes())}:${pad(configTime.getSeconds())}`;
-      console.log(`[OPTIONS] Sending time in options: ${timeStr}`);
+      const tz = SN && deviceTimezones.has(SN as string) ? deviceTimezones.get(SN as string)! : TIMEZONE_OFFSET;
+      console.log(`[OPTIONS] Sending time in options: ${timeStr} (TZ: ${tz})`);
       
       return text([
         `GET OPTION FROM: ${SN || "UNKNOWN"}`,
@@ -161,7 +181,7 @@ const app = new Elysia()
         "Encrypt=0",
         "PushProtVer=2.4.1",
         `ServerTime=${timeStr}`,
-        `TimeZone=${TIMEZONE_OFFSET}`
+        `TimeZone=${tz}`
       ].join("\n"));
     }
 
